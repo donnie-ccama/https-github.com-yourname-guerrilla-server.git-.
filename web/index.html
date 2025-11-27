@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EXCLUSIVE CONTENT</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #000;
+            color: #fff;
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            text-align: center;
+        }
+        .container {
+            width: 90%;
+            max-width: 600px;
+        }
+        h1 {
+            color: #e50914; /* Netflix Red style */
+            font-size: 2rem;
+            margin-bottom: 1rem;
+            text-transform: uppercase;
+        }
+        .video-wrapper {
+            position: relative;
+            padding-bottom: 56.25%; /* 16:9 Aspect Ratio */
+            height: 0;
+            background: #222;
+            border: 2px solid #333;
+            border-radius: 8px;
+            overflow: hidden;
+            margin-bottom: 20px;
+        }
+        video {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        .cta-button {
+            display: inline-block;
+            background: #e50914;
+            color: white;
+            padding: 15px 30px;
+            font-size: 1.2rem;
+            font-weight: bold;
+            text-decoration: none;
+            border-radius: 5px;
+            margin-top: 20px;
+            transition: background 0.3s;
+        }
+        .cta-button:hover {
+            background: #ff0f1f;
+        }
+        .note {
+            margin-top: 15px;
+            font-size: 0.8rem;
+            color: #888;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Leak Detected</h1>
+        <div class="video-wrapper">
+            <!-- Ensure your video file is named 'video.mp4' and placed in /var/www/html/video/ -->
+            <video controls autoplay muted playsinline poster="/video/poster.jpg">
+                <source src="/video/video.mp4" type="video/mp4">
+                Your browser does not support the video tag.
+            </video>
+        </div>
+        <p>You have accessed the local node.</p>
+        <a href="https://www.yourmarketingfirm.com" class="cta-button" target="_blank">
+            GET THE FULL DROP
+        </a>
+        <p class="note">
+            Note: To visit the website, you may need to disconnect from this WiFi network 
+            to restore your internet connection.
+        </p>
+    </div>
+</body>
+</html>
