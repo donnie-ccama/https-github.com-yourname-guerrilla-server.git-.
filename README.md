@@ -1,0 +1,1 @@
+This is a script for the headless Rasberry Pi5 to run as a marketing beacon using the wifi antenna.  To boost the range of the signal and allow for al least 10 concurrent users, install a Alfa Network AWUS036ACM wifi antenna.
