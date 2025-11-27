@@ -1,0 +1,521 @@
+#!/bin/bash
+
+# --- GUERRILLA SERVER PROJECT BUNDLER ---
+# This script creates the directory structure, writes the source code,
+# generates a full README (MD and HTML) based on our architectural decisions,
+# and pushes it to your GitHub repository.
+
+PROJECT_DIR="guerrilla-server"
+
+echo ">>> Creating project directory: $PROJECT_DIR..."
+mkdir -p "$PROJECT_DIR/config"
+mkdir -p "$PROJECT_DIR/web"
+
+# --- 1. GENERATE INSTALLER SCRIPT ---
+echo ">>> Generating setup.sh..."
+cat > "$PROJECT_DIR/setup.sh" << 'EOF'
+#!/bin/bash
+
+# --- GUERRILLA SERVER INSTALLER ---
+# Target: Raspberry Pi 5 running Raspberry Pi OS (Bookworm)
+# Hardware: External WiFi Adapter (wlan1)
+# Uplink: USB Tethering (Android/iOS)
+
+echo ">>> STARTING INSTALLATION..."
+echo ">>> Updating repositories..."
+apt-get update && apt-get upgrade -y
+
+echo ">>> Installing dependencies..."
+# hostapd: Creates the hotspot
+# dnsmasq: Handles IP addresses and the 'Captive Portal' redirect
+# nginx: Serves the video website
+# usbmuxd: Required for iPhone USB tethering
+apt-get install -y hostapd dnsmasq nginx netfilter-persistent iptables-persistent usbmuxd libimobiledevice-utils
+
+echo ">>> Configuring NetworkManager to IGNORE wlan1..."
+# We need manual control over the external card (wlan1). 
+# This prevents the OS from trying to use it as a normal client.
+cat > /etc/NetworkManager/conf.d/99-unmanaged-devices.conf <<CONF
+[keyfile]
+unmanaged-devices=interface-name:wlan1
+CONF
+
+# Reload NetworkManager to apply the ignore rule
+systemctl reload NetworkManager
+
+echo ">>> Setting Static IP for wlan1..."
+# We manually assign the gateway IP (192.168.4.1) to the interface
+cat > /etc/network/interfaces.d/wlan1 <<NET
+auto wlan1
+iface wlan1 inet static
+    address 192.168.4.1
+    netmask 255.255.255.0
+NET
+
+echo ">>> Enabling IP Forwarding..."
+# Allows traffic to flow correctly
+echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+sysctl -p
+
+echo ">>> Configuring NAT (Internet Sharing)..."
+# Masquerade traffic leaving via USB (Android usually usb0, iOS usually eth1)
+# This allows the 'Island' to share the phone's 5G connection
+iptables -t nat -A POSTROUTING -o usb0 -j MASQUERADE
+iptables -t nat -A POSTROUTING -o eth1 -j MASQUERADE
+# Save rules so they persist after reboot
+netfilter-persistent save
+
+echo ">>> Configuring Nginx..."
+# Remove default site to avoid conflicts
+rm /etc/nginx/sites-enabled/default
+# Create the web root directory
+mkdir -p /var/www/html/video
+chown -R www-data:www-data /var/www/html
+
+echo ">>> Unmasking and Enabling Services..."
+systemctl unmask hostapd
+systemctl enable hostapd
+systemctl enable dnsmasq
+systemctl enable nginx
+
+echo ">>> INSTALLATION COMPLETE."
+echo ">>> Please copy the config files (hostapd.conf, dnsmasq.conf, nginx_site.conf) to their respective locations."
+echo ">>> Then reboot the Pi."
+EOF
+
+# Make setup executable
+chmod +x "$PROJECT_DIR/setup.sh"
+
+# --- 2. GENERATE HOSTAPD CONFIG ---
+echo ">>> Generating config/hostapd.conf..."
+cat > "$PROJECT_DIR/config/hostapd.conf" << 'EOF'
+# Interface: The External Alfa Card
+interface=wlan1
+driver=nl80211
+
+# SSID: The "Bait" Name
+ssid=⚠️ FREE_EXCLUSIVE_LEAK
+# utf8_ssid=1 # Enable if using emojis in the name
+
+# Operation Mode: 5GHz (Hardware Mode 'a')
+hw_mode=a
+# Channel: 36 is standard for 5GHz. Ensure no interference.
+channel=36
+
+# 802.11ac configuration (High Speed)
+ieee80211n=1
+ieee80211ac=1
+wmm_enabled=1
+
+# Country Code (Change if not in US)
+country_code=US
+
+# HT (High Throughput) Capabilities
+ht_capab=[HT40+][SHORT-GI-40][DSSS_CCK-40]
+
+# VHT (Very High Throughput) Capabilities for AC
+vht_capab=[MAX-MPDU-3895][SHORT-GI-80][TX-STBC-2BY1][RX-STBC-1]
+vht_oper_chwidth=1
+vht_oper_centr_freq_seg0_idx=42
+
+# Security: OPEN (No Password)
+auth_algs=1
+wpa=0
+EOF
+
+# --- 3. GENERATE DNSMASQ CONFIG ---
+echo ">>> Generating config/dnsmasq.conf..."
+cat > "$PROJECT_DIR/config/dnsmasq.conf" << 'EOF'
+# Interface to listen on
+interface=wlan1
+
+# DHCP Range
+dhcp-range=192.168.4.10,192.168.4.250,255.255.255.0,12h
+
+# --- TARGETED CAPTIVE PORTAL TRAP ---
+# Instead of hijacking EVERYTHING (which breaks the internet link),
+# we only hijack the specific domains phones use to check for wifi.
+
+# Apple (iOS/macOS)
+address=/captive.apple.com/192.168.4.1
+address=/airport.us/192.168.4.1
+
+# Android / Google
+address=/connectivitycheck.gstatic.com/192.168.4.1
+address=/connectivitycheck.android.com/192.168.4.1
+address=/clients3.google.com/192.168.4.1
+
+# Microsoft / Windows
+address=/msftncsi.com/192.168.4.1
+address=/www.msftncsi.com/192.168.4.1
+
+# For everything else (like your real marketing link), use Google DNS
+server=8.8.8.8
+server=8.8.4.4
+
+# Anti-Loop mechanisms
+domain-needed
+bogus-priv
+no-resolv
+no-poll
+EOF
+
+# --- 4. GENERATE NGINX CONFIG ---
+echo ">>> Generating config/guerrilla.conf..."
+cat > "$PROJECT_DIR/config/guerrilla.conf" << 'EOF'
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+
+    # Web Root
+    root /var/www/html;
+    index index.html;
+
+    server_name _;
+
+    # --- CAPTIVE PORTAL TRIGGERS ---
+    
+    # iOS/macOS Captive Network Assistant check
+    location /hotspot-detect.html {
+        return 302 http://192.168.4.1/index.html;
+    }
+
+    # Android Gen 204 Check
+    location /generate_204 {
+        return 302 http://192.168.4.1/index.html;
+    }
+
+    # Catch-all redirect
+    # If they try to go to google.com, redirect to our landing page
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Video Optimization
+    location /video/ {
+        mp4;
+        mp4_buffer_size 1m;
+        mp4_max_buffer_size 5m;
+    }
+}
+EOF
+
+# --- 5. GENERATE LANDING PAGE ---
+echo ">>> Generating web/index.html..."
+cat > "$PROJECT_DIR/web/index.html" << 'EOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EXCLUSIVE CONTENT</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #000;
+            color: #fff;
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            text-align: center;
+        }
+        .container {
+            width: 90%;
+            max-width: 600px;
+        }
+        h1 {
+            color: #e50914; /* Netflix Red style */
+            font-size: 2rem;
+            margin-bottom: 1rem;
+            text-transform: uppercase;
+        }
+        .video-wrapper {
+            position: relative;
+            padding-bottom: 56.25%; /* 16:9 Aspect Ratio */
+            height: 0;
+            background: #222;
+            border: 2px solid #333;
+            border-radius: 8px;
+            overflow: hidden;
+            margin-bottom: 20px;
+        }
+        video {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        .cta-button {
+            display: inline-block;
+            background: #e50914;
+            color: white;
+            padding: 15px 30px;
+            font-size: 1.2rem;
+            font-weight: bold;
+            text-decoration: none;
+            border-radius: 5px;
+            margin-top: 20px;
+            transition: background 0.3s;
+        }
+        .cta-button:hover {
+            background: #ff0f1f;
+        }
+        .note {
+            margin-top: 15px;
+            font-size: 0.8rem;
+            color: #888;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Leak Detected</h1>
+        <div class="video-wrapper">
+            <!-- Ensure your video file is named 'video.mp4' and placed in /var/www/html/video/ -->
+            <video controls autoplay muted playsinline poster="/video/poster.jpg">
+                <source src="/video/video.mp4" type="video/mp4">
+                Your browser does not support the video tag.
+            </video>
+        </div>
+        <p>You have accessed the local node.</p>
+        <a href="https://www.yourmarketingfirm.com" class="cta-button" target="_blank">
+            GET THE FULL DROP
+        </a>
+        <p class="note">
+            Note: Internet access is enabled via local uplink.
+        </p>
+    </div>
+</body>
+</html>
+EOF
+
+# --- 6. GENERATE README.md ---
+echo ">>> Generating README.md..."
+cat > "$PROJECT_DIR/README.md" << 'EOF'
+# Guerrilla Marketing Wireless Server
+
+An innovative portable media server designed for guerrilla marketing campaigns. This system broadcasts a Wi-Fi signal ("The Bait") that triggers a Captive Portal notification on nearby smartphones, inviting users to watch an exclusive video and click through to a campaign website.
+
+## 🏗️ Hardware Architecture
+
+We chose the **Raspberry Pi 5** over the Jetson Nano for superior Wi-Fi/IO performance and battery efficiency.
+
+* **Core:** Raspberry Pi 5 (4GB RAM)
+* **Storage:** High-Speed MicroSD (Application Class A2)
+* **Wi-Fi Adapter:** Alfa Network AWUS036ACM (MediaTek MT7612U Chipset) - *Required for high-bandwidth 5GHz broadcasting.*
+* **Power:** Anker 737 Power Bank (or equivalent high-amperage portable battery).
+* **Cooling:** Active cooling case (e.g., Argon NEO 5) to prevent throttling in backpacks.
+* **Uplink:** Android or iOS device with 5G tethering (via USB).
+
+## 🛠️ Software Stack
+
+* **OS:** Raspberry Pi OS (Bookworm)
+* **Hostapd:** Manages the Wi-Fi Access Point (5GHz, 802.11ac).
+* **Dnsmasq:** Acts as the "Traffic Cop" and Captive Portal trap.
+* **Nginx:** High-performance web server optimized for video streaming.
+* **Iptables:** Manages NAT and internet sharing from USB tether to Wi-Fi clients.
+
+## 🚀 Installation
+
+1.  Clone this repository to your Raspberry Pi:
+    ```bash
+    git clone <your-repo-url>
+    cd guerrilla-server
+    ```
+
+2.  Run the installer script (requires sudo):
+    ```bash
+    sudo ./setup.sh
+    ```
+
+3.  **Manual Step:** Copy the config files to their system locations:
+    ```bash
+    sudo cp config/hostapd.conf /etc/hostapd/hostapd.conf
+    sudo cp config/dnsmasq.conf /etc/dnsmasq.conf
+    sudo cp config/guerrilla.conf /etc/nginx/sites-available/guerrilla
+    sudo ln -s /etc/nginx/sites-available/guerrilla /etc/nginx/sites-enabled/
+    ```
+
+4.  Reboot the Pi.
+
+## 🎬 Media Preparation (Crucial)
+
+Do not use raw video files. They will clog the Wi-Fi bandwidth. Use **FFmpeg** to optimize your video for mobile streaming (1080p, H.264, Low Bitrate).
+
+**Optimization Command:**
+```bash
+ffmpeg -i input_master.mov \
+-c:v libx264 -preset slow -profile:v high -level 4.0 \
+-b:v 2500k -maxrate 3000k -bufsize 6000k \
+-vf "scale=1920:-2" \
+-c:a aac -b:a 128k \
+-movflags +faststart \
+video.mp4
+```
+
+**File Placement:**
+Place the optimized file at: `/var/www/html/video/video.mp4`
+
+## 🔗 Customization
+
+* **SSID Name:** Edit `/etc/hostapd/hostapd.conf` to change the Wi-Fi name (currently `⚠️ FREE_EXCLUSIVE_LEAK`).
+* **Campaign Link:** Edit `/var/www/html/index.html` to update the "GET THE FULL DROP" button URL.
+
+## 📱 Internet Uplink (Tethering)
+
+To ensure the "Call to Action" link works for the user:
+1.  Connect a 5G phone to the Raspberry Pi via USB.
+2.  Enable **USB Tethering** on the phone settings.
+3.  The Pi is configured to automatically route user traffic through this USB connection.
+EOF
+
+# --- 7. GENERATE README.html ---
+echo ">>> Generating README.html..."
+cat > "$PROJECT_DIR/README.html" << 'EOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Guerrilla Marketing Wireless Server - Documentation</title>
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px; color: #333; background: #f9f9f9; }
+        h1 { border-bottom: 3px solid #e50914; padding-bottom: 10px; color: #111; }
+        h2 { margin-top: 40px; color: #e50914; border-bottom: 1px solid #ddd; padding-bottom: 5px; }
+        p, li { font-size: 1.1em; }
+        code { background: #e0e0e0; padding: 2px 5px; border-radius: 3px; font-family: 'Courier New', monospace; font-size: 0.9em; color: #c7254e; }
+        pre { background: #2d2d2d; color: #f8f8f2; padding: 15px; border-radius: 5px; overflow-x: auto; }
+        pre code { background: none; color: inherit; padding: 0; }
+        ul { padding-left: 20px; }
+        li { margin-bottom: 8px; }
+        strong { color: #000; }
+        .warning { background: #fff3cd; border: 1px solid #ffeeba; color: #856404; padding: 10px; border-radius: 5px; margin: 20px 0; }
+    </style>
+</head>
+<body>
+
+    <h1>Guerrilla Marketing Wireless Server</h1>
+    <p>An innovative portable media server designed for guerrilla marketing campaigns. This system broadcasts a Wi-Fi signal ("The Bait") that triggers a Captive Portal notification on nearby smartphones, inviting users to watch an exclusive video and click through to a campaign website.</p>
+
+    <h2>🏗️ Hardware Architecture</h2>
+    <p>We chose the <strong>Raspberry Pi 5</strong> over the Jetson Nano for superior Wi-Fi/IO performance and battery efficiency.</p>
+    <ul>
+        <li><strong>Core:</strong> Raspberry Pi 5 (4GB RAM)</li>
+        <li><strong>Storage:</strong> High-Speed MicroSD (Application Class A2)</li>
+        <li><strong>Wi-Fi Adapter:</strong> Alfa Network AWUS036ACM (MediaTek MT7612U Chipset) - <em>Required for high-bandwidth 5GHz broadcasting.</em></li>
+        <li><strong>Power:</strong> Anker 737 Power Bank (or equivalent high-amperage portable battery).</li>
+        <li><strong>Cooling:</strong> Active cooling case (e.g., Argon NEO 5) to prevent throttling in backpacks.</li>
+        <li><strong>Uplink:</strong> Android or iOS device with 5G tethering (via USB).</li>
+    </ul>
+
+    <h2>🛠️ Software Stack</h2>
+    <ul>
+        <li><strong>OS:</strong> Raspberry Pi OS (Bookworm)</li>
+        <li><strong>Hostapd:</strong> Manages the Wi-Fi Access Point (5GHz, 802.11ac).</li>
+        <li><strong>Dnsmasq:</strong> Acts as the "Traffic Cop" and Captive Portal trap.</li>
+        <li><strong>Nginx:</strong> High-performance web server optimized for video streaming.</li>
+        <li><strong>Iptables:</strong> Manages NAT and internet sharing from USB tether to Wi-Fi clients.</li>
+    </ul>
+
+    <h2>🚀 Installation</h2>
+    <ol>
+        <li>Clone this repository to your Raspberry Pi:
+            <pre><code>git clone &lt;your-repo-url&gt;
+cd guerrilla-server</code></pre>
+        </li>
+        <li>Run the installer script (requires sudo):
+            <pre><code>sudo ./setup.sh</code></pre>
+        </li>
+        <li><strong>Manual Step:</strong> Copy the config files to their system locations:
+            <pre><code>sudo cp config/hostapd.conf /etc/hostapd/hostapd.conf
+sudo cp config/dnsmasq.conf /etc/dnsmasq.conf
+sudo cp config/guerrilla.conf /etc/nginx/sites-available/guerrilla
+sudo ln -s /etc/nginx/sites-available/guerrilla /etc/nginx/sites-enabled/</code></pre>
+        </li>
+        <li>Reboot the Pi.</li>
+    </ol>
+
+    <h2>🎬 Media Preparation (Crucial)</h2>
+    <div class="warning">
+        <strong>Note:</strong> Do not use raw video files. They will clog the Wi-Fi bandwidth. Use <strong>FFmpeg</strong> to optimize your video for mobile streaming (1080p, H.264, Low Bitrate).
+    </div>
+    
+    <p><strong>Optimization Command:</strong></p>
+    <pre><code>ffmpeg -i input_master.mov \
+-c:v libx264 -preset slow -profile:v high -level 4.0 \
+-b:v 2500k -maxrate 3000k -bufsize 6000k \
+-vf "scale=1920:-2" \
+-c:a aac -b:a 128k \
+-movflags +faststart \
+video.mp4</code></pre>
+
+    <p><strong>File Placement:</strong><br>
+    Place the optimized file at: <code>/var/www/html/video/video.mp4</code></p>
+
+    <h2>🔗 Customization</h2>
+    <ul>
+        <li><strong>SSID Name:</strong> Edit <code>/etc/hostapd/hostapd.conf</code> to change the Wi-Fi name (currently <code>⚠️ FREE_EXCLUSIVE_LEAK</code>).</li>
+        <li><strong>Campaign Link:</strong> Edit <code>/var/www/html/index.html</code> to update the "GET THE FULL DROP" button URL.</li>
+    </ul>
+
+    <h2>📱 Internet Uplink (Tethering)</h2>
+    <p>To ensure the "Call to Action" link works for the user:</p>
+    <ol>
+        <li>Connect a 5G phone to the Raspberry Pi via USB.</li>
+        <li>Enable <strong>USB Tethering</strong> on the phone settings.</li>
+        <li>The Pi is configured to automatically route user traffic through this USB connection.</li>
+    </ol>
+
+</body>
+</html>
+EOF
+
+# --- 8. GITHUB PUSH ---
+echo ">>> All files generated."
+echo ">>> Initializing Git Repository..."
+
+cd "$PROJECT_DIR"
+git init
+
+# --- FIX: Set Local Git Identity for this project ---
+# This ensures the commit succeeds even if you haven't configured global git settings
+if [ -z "$(git config user.email)" ]; then
+    echo ">>> Git user not configured. Setting temporary identity for this repo..."
+    git config user.email "guerrilla@local"
+    git config user.name "Guerrilla Server"
+fi
+
+git add .
+git commit -m "Initial commit: Guerrilla Server Architecture"
+git branch -M main
+
+echo ""
+echo "---------------------------------------------------------"
+echo "ENTER YOUR GITHUB REPOSITORY URL BELOW"
+echo "(Example: https://github.com/YourUsername/guerrilla-server.git)"
+echo "---------------------------------------------------------"
+read -p "Repo URL: " REPO_URL
+
+if [ -z "$REPO_URL" ]; then
+    echo ">>> No URL entered. Files are saved in $PROJECT_DIR, but not pushed."
+    exit 1
+fi
+
+echo ">>> Adding remote origin..."
+# Check if remote already exists to prevent errors on re-run
+if git remote | grep -q "^origin$"; then
+    git remote set-url origin "$REPO_URL"
+else
+    git remote add origin "$REPO_URL"
+fi
+
+echo ">>> Pushing to GitHub..."
+echo ">>> NOTE: If asked for a password, use your GitHub Personal Access Token (PAT)."
+git push -u origin main
+
+echo ">>> SUCCESS! Code is live on GitHub."
